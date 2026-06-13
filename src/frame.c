@@ -7160,15 +7160,27 @@ make_monitor_attribute_list (struct MonitorInfo *monitors,
 
       attributes = Fcons (Fcons (Qframes, AREF (monitor_frames, i)),
 			  attributes);
-#ifdef HAVE_PGTK
+#if defined(HAVE_PGTK)
       attributes = Fcons (Fcons (Qscale_factor, make_float (mi->scale_factor)),
 			  attributes);
+#elif (defined(HAVE_GTK3) && defined(HAVE_XRANDR))
+      if (mi->scale_factor > 0.0)
+	attributes = Fcons (Fcons (Qscale_factor,
+				   make_float (mi->scale_factor)),
+			    attributes);
 #endif
       attributes = Fcons (Fcons (Qmm_size,
                                  list2i (mi->mm_width, mi->mm_height)),
                           attributes);
       attributes = Fcons (Fcons (Qworkarea, workarea), attributes);
       attributes = Fcons (Fcons (Qgeometry, geometry), attributes);
+#ifdef HAVE_XRANDR
+      if ((mi->native_width > 0) && (mi->native_height > 0))
+	attributes = Fcons (Fcons (Qresolution,
+				   list2i (mi->native_width,
+					   mi->native_height)),
+			    attributes);
+#endif
       if (mi->name)
         attributes = Fcons (Fcons (Qname, make_string (mi->name,
                                                        strlen (mi->name))),
@@ -7281,7 +7293,10 @@ syms_of_frame (void)
 
   DEFSYM (Qworkarea, "workarea");
   DEFSYM (Qmm_size, "mm-size");
-#ifdef HAVE_PGTK
+#ifdef HAVE_XRANDR
+  DEFSYM (Qresolution, "resolution");
+#endif
+#if defined(HAVE_PGTK) || (defined(HAVE_GTK3) && defined(HAVE_XRANDR))
   DEFSYM (Qscale_factor, "scale-factor");
 #endif
   DEFSYM (Qframes, "frames");

@@ -385,6 +385,76 @@ monitor) that is part of a single monitor collection on that X server.
 When you use two or more screens belonging to one server, Emacs knows
 by the similarity in their names that they share a single keyboard.
 
+  A single X display may also span a number of physical monitors using a
+common coordinate system (usually provided by the XRandR X server
+extension).  XRandR have built-in support for multiple monitors with
+different resolutions, and when the resolutions differ between the
+monitors (or when using monitors with High DPI, for instance 4K
+monitors) the graphical UI elements on the display can be \"scaled\" by
+the window manager (this is usually called \"fractional scaling\").
+
+@cindex native resolution
+@cindex scaled resolution
+@cindex fractional scaling
+@cindex scale-factor
+@cindex high dpi
+@cindex hdpi
+  When using a High DPI (HDPI) monitor the effect is that when GUI
+elements (buttons, menus, fonts, and so on) are rendered on the monitor
+they appear small.  This is due to that their sizes (width and height)
+are expressed in numbers of pixels, and when the relative size of a
+pixel shrinks so does also the size of the GUI elements and rendered
+fonts.  To address this some desktop environments support configuring a
+scale factor that is applied to all GUI elements (including fonts) per
+display.  Thus you can define a system wide font to be used across all
+displays as \"12 points\" and the actual rendered size will be the
+similar regardless of if the font is rendered on a normal DPI or a high
+DPI monitor.  This @dfn{scale-factor} is usually expressed as a
+percentage value greater than 100%, where 100% means that the GUI
+element is rendered without any scale factor applied. In this context
+@dfn{fractional scaling} means percentage scales in-between 100%, 200%
+(double size), 300% (three times the size), and so on.
+
+  Specifically @w{GTK 3} (one of the X toolkits Emacs can be built for)
+have only partial support for fractional scaling (the underlying API
+provided by GTK and its low-level counterpart GDK) only supports integer
+scale factors; that is an integer scale of 1 means a scale factor of
+100%, 2 means 200%, and so on.  However, when a @w{GTK 3} build of Emacs
+runs on a desktop environment such as GNOME built using the later @w{GTK
+4} version of the API that do support fractional scaling, the @w{GTK 3}
+API will report back an integer scale that is the fractional scale
+rounded up to the next larger scale that can be evenly divided by 100%.
+For instance a fractional scale of 125% will be reported as an integer
+scale of 2 (representing a 200% scale factor).
+
+  The screen size (width and height in pixels) for a monitor on the
+other hand is actually fractionally scaled when using, for instance, a
+GNOME desktop implemented using GTK 4 even if @w{GTK 3} libraries are
+used.  Internally an Emacs built for @w{GTK 3} on X will always
+internally scale the obtained screen size with the integer scale factor
+returned from GTK 3 API call.  For instance a 4K monitor (3840x2160
+pixels) with configured fractional scaling of 125% will be reported from
+GDK 3 API as having a width of 3840/1.25 = 3072 pixels and a height of
+2160/1.25 = 1728 pixels.  Emacs will then multiply both of these values
+with 2 (as 1.25 rounded upwards is 2) which results in a reported
+resolution of 6144x3456 pixels when calling
+@code{display-monitor-attributes-list}.  The actual fractional scaling
+value can be calculated by simply dividing the native resolution (for
+instance 3840 pixels) by the corresponding scaled resolution as reported
+from @w{GTK 3} (for instance 3072 pixels) which is 1.25 or 125%.
+
+  When running an Emacs built with XRandR support on an X server with
+support for the RandR extension Emacs will include the native monitor
+resolution in the result from @code{display-monitor-attributes-list}.
+Furthermore, when a @w{GTK 3} build of Emacs with XRandR support runs on
+an X server with RandR extension the configured fractional scale per
+monitor is calculated by Emacs as described above.
+
+  Note that for an Emacs built for pure GTK toolkit (that is native
+Wayland support instead of X11), then the scale factor is directly
+obtained from the GTK API as a newer version of the API is used in that
+case.
+
   Systems that don't use the X window system, such as MS-Windows,
 don't support the notion of X displays, and have only one display on
 each host.  The display name on these systems doesn't follow the above
@@ -445,8 +515,11 @@ than one physical monitor.  You can use the functions
 to obtain information about such setups.
 
 @cindex display geometry
+@cindex display resolution
 @cindex monitor geometry
+@cindex monitor resolution
 @cindex geometry of display monitor
+@cindex resolution of display monitor
 @defun display-monitor-attributes-list &optional display
 This function returns a list of physical monitor attributes on
 @var{display}, which can be a display name (a string), a terminal, or
@@ -457,11 +530,17 @@ corresponds to the primary monitor.  The attribute keys and values
 are:
 
 @table @samp
+@item resolution
+The native resolution of the monitor in pixels, as @samp{@var{width}
+@var{height})}.
+
 @item geometry
 Position of the top-left corner of the monitor's screen and its size,
 in pixels, as @samp{(@var{x} @var{y} @var{width} @var{height})}.  Note
 that, if the monitor is not the primary monitor, some of the
-coordinates might be negative.
+coordinates might be negative.  Note also that the values might refer
+to a scaled coordinate space (scaled resolution) when for instance
+fractional scaling is used for the monitor.
 
 @item workarea
 Position of the top-left corner and size of the work area (usable
@@ -471,7 +550,9 @@ various window manager features (docks, taskbars, etc.)@: may be
 excluded from the work area.  Whether or not such features actually
 subtract from the work area depends on the platform and environment.
 Again, if the monitor is not the primary monitor, some of the
-coordinates might be negative.
+coordinates might be negative.  Note that the values might refer to a
+scaled coordinate space  (scaled resolution) when for instance
+fractional scaling is used for the monitor.
 
 @item mm-size
 Width and height in millimeters as @samp{(@var{width} @var{height})}
@@ -483,17 +564,29 @@ List of frames that this physical monitor dominates (see below).
 Name of the physical monitor as @var{string}.
 
 @item source
-Source of the multi-monitor information as @var{string};
-on X, it could be @samp{XRandR 1.5}, @samp{XRandr}, @samp{Xinerama},
-@samp{Gdk}, or @samp{fallback}.  The last value of @samp{source} means
-that Emacs was built without GTK and without XRandR or Xinerama
+Source of the multi-monitor information as @var{string}; on X, it could
+be @samp{XRandR 1.5}, @samp{XRandr}, @samp{Xinerama}, @samp{Gdk},
+@samp{Gdk+XRandR}, or @samp{fallback}.  The last value of @samp{source}
+means that Emacs was built without GTK and without XRandR or Xinerama
 extensions, in which case the information about multiple physical
 monitors will be provided as if they all as a whole formed a single
-monitor.
+monitor.  When the @samp{source} is \"Gdk+XRandR\" this means that the
+native resolution is provided via explicit calls to XRandR. Gdk can only
+provide the scaled size (scaled resolution) of a monitor and it is this
+width and height that is reported in the `geometry' and `workarea' keys.
+
+@item scale-factor
+Fractional scaling scale factor used for a monitor as
+@samp{@var{scale-factor}}.  When @samp{source} is \"Gdk+XRandR\" the
+scale factor is calculated internally by Emacs using the native
+resolution and the scaled resolution.
 @end table
 
 @var{x}, @var{y}, @var{width}, and @var{height} are integers.
-@samp{name} and @samp{source} may be absent.
+@var{scale-factor} is a floating point number representing a percentage,
+that is 1.25 is the same as 125%.
+@samp{name}, @samp{resolution}, @samp{scale-factor}, and @samp{source}
+may be absent.
 
 A frame is @dfn{dominated} by a physical monitor when either the
 largest area of the frame resides in that monitor, or (if the frame
@@ -502,8 +595,8 @@ to the frame.  Every (non-tooltip) frame (whether visible or not) in a
 graphical display is dominated by exactly one physical monitor at a
 time, though the frame can span multiple (or no) physical monitors.
 
-Here's an example of the data produced by this function on a 2-monitor
-display:
+Here are two examples of the data produced by this function on a
+2-monitor display:
 
 @lisp
   (display-monitor-attributes-list)
@@ -519,6 +612,34 @@ display:
     (mm-size 593 370)
     (name . "DISPLAY2")
     (frames)))
+@end lisp
+
+@lisp
+  (display-monitor-attributes-list)
+  @result{}
+  (((name . "DISPLAY1")
+    (resolution 1920 1080)       ;; @r{Native resolution is 1920x1080 pixels.}
+    (geometry 3840 0 3072 1728)  ;; @r{Right-hand, primary monitor, using a}
+                                 ;; @r{scaled coordinate system.}
+    (workarea 3972 64 2940 1664) ;; @r{A taskbar occupies some of the height}
+                                 ;; @r{and a panel is on the left.}
+                                 ;; @r{Note that coordinates are given in a}
+                                 ;; @r{scaled coordinate system.}
+    (mm-size 521 293)
+    (scale-factor . 1.25)     ;; @r{A scale-factor of 1.25 means 125% scale.}
+    (frames #<frame emacs@@host *Messages* 0x555555f66680>
+            #<frame emacs@@host *scratch* 0x5555586670a0>)
+    (source . "Gdk+XRandR"))  ;; @r{Native resolution obtained via XRandR.}
+   ((name . "DISPLAY2")
+    (resolution 1920 1200)     ;; @r{Native resolution is 1920x1200 pixels.}
+    (geometry 0 0 3840 2400)   ;; @r{Left-hand monitor; scaled coordinate}
+                               ;; @r{system is used.}
+    (workarea 132 0 3708 2400) ;; @r{A panel occupies some of the width;}
+                               ;; @r{scaled coordinate system is used.}
+    (mm-size 344 215)
+    (scale-factor . 1.0)       ;; @r{A scale-factor of 1.0 means 100% scale.}
+    (frames)
+    (source . "Gdk+XRandR")))  ;; @r{Native resolution obtained via XRandR.}
 @end lisp
 
 @end defun

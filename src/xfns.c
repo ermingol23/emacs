@@ -22,6 +22,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <stdlib.h>
 #include <math.h>
 #include <unistd.h>
+#include <string.h>
 
 #include "lisp.h"
 #include "character.h"
@@ -6119,6 +6120,115 @@ x_get_net_workarea (struct x_display_info *dpyinfo, XRectangle *rect)
 }
 #endif /* !(USE_GTK && HAVE_GTK3) */
 
+#ifdef HAVE_XRANDR
+/* This data structure stores native resolution of a monitor (width and
+   height) together with its name (e.g. "HDMI-0") where the name is used
+   as a key when matching between enumerated monitors and instances of
+   this struct.  */
+struct monitor_native_res
+{
+  /* Name of display.  */
+  char *name;
+  /* Native width of display in pixels.  */
+  int width;
+  /* Native height of display in pixels.  */
+  int height;
+};
+
+#define XFNS_XRANDR_NOT_AVAILABLE -1
+
+/* Iterate over all XRandR video outputs (see
+   https://gitlab.freedesktop.org/xorg/proto/xorgproto/-/blob/master/randrproto.txt?ref_type=heads
+   for an explanation of terminology used below; when reading that text
+   please keep in mind that CRTC stands for CRT Controller or Cathode
+   Ray Tube Controller), and for each such video output that is
+   connected to a monitor find its native resolution.  Only native
+   resolutions where the output video mode and the screen mode match are
+   considered.  Found resolutions are stored together with the name
+   assigned to the output in an entry in the given struct
+   monitor_native_res which is of size n_entries.  Thus only at most
+   n_entries can be stored, but since each video output usually has multiple
+   video modes associated with it, not all entries are usually used.
+
+   The number of entries used is returned; if something went wrong
+   XFNS_XRANDR_NOT_AVAILABLE is returned instead.  */
+static int
+extract_native_res (struct x_display_info *dpyinfo,
+		    struct monitor_native_res *mnr, int n_entries)
+{
+  Display *dpy = dpyinfo->display;
+  Window root = dpyinfo->root_window;
+
+  XRRScreenResources *resources = XRRGetScreenResourcesCurrent(dpy, root);
+  XRROutputInfo *output_info;
+
+  if (resources == NULL)
+    return XFNS_XRANDR_NOT_AVAILABLE;
+
+  int monitor_cnt = 0;
+  for (int i = 0; (i < resources->noutput) && (monitor_cnt < n_entries); i++)
+    {
+      output_info = XRRGetOutputInfo (dpy, resources, resources->outputs[i]);
+
+      /* Only consider connected outputs.  */
+      if ((output_info->connection) == RR_Connected)
+	{
+	  RRMode *output_mode = output_info->modes;
+	  XRRModeInfo *screen_mode = resources->modes;
+	  if (output_mode && screen_mode)
+	    {
+	      for (int index=0; index<(resources->nmode); index++)
+		{
+		  if ((*output_mode) == (screen_mode[index].id))
+		    {
+		      mnr[monitor_cnt].name = xstrdup (output_info->name);
+		      mnr[monitor_cnt].width = screen_mode[index].width;
+		      mnr[monitor_cnt].height = screen_mode[index].height;
+		      monitor_cnt++;
+		      break;
+		    }
+		}
+	    }
+	}
+      XRRFreeOutputInfo (output_info);
+    }
+  XRRFreeScreenResources (resources);
+
+  return monitor_cnt;
+}
+
+static void
+free_monitor_res (struct monitor_native_res *mnr, int n_entries)
+{
+  /* Do not crash if mnr is NULL.  */
+  if (mnr)
+    {
+      for (int i = 0; i < n_entries; ++i)
+	xfree (mnr[i].name);
+      xfree (mnr);
+    }
+}
+
+/* Given an output name, pointer to a struct monitor_native_res array,
+   and the number of entries in the array deduce the native resolution
+   for the monitor with the given name. The deduced width and height is
+   returned in the out-parameters width and height.  */
+static void
+deduce_width_height (int *width, int *height, char *name,
+		     struct monitor_native_res *mnr, int n_entries)
+{
+  for (int i = 0; i < n_entries; i++)
+    {
+      if (strcmp(name, mnr[i].name) == 0)
+	{
+	  *width = mnr[i].width;
+	  *height = mnr[i].height;
+	  break;
+	}
+    }
+}
+#endif
+
 #ifndef USE_GTK
 
 /* Return monitor number where F is "most" or closest to.  */
@@ -6305,6 +6415,9 @@ x_get_monitor_attributes_xrandr (struct x_display_info *dpyinfo)
   RROutput pxid = None;
   struct MonitorInfo *monitors;
   bool randr15_p = false;
+  bool xrr_ok = ((dpyinfo->xrandr_major_version == 1
+		  && dpyinfo->xrandr_minor_version >= 2)
+		 || dpyinfo->xrandr_major_version > 1);
 
 #if RANDR_MAJOR > 1 || (RANDR_MAJOR == 1 && RANDR_MINOR >= 5)
   XRRMonitorInfo *rr_monitors;
@@ -6497,6 +6610,39 @@ x_get_monitor_attributes_xrandr (struct x_display_info *dpyinfo)
 #if RANDR_MAJOR > 1 || (RANDR_MAJOR == 1 && RANDR_MINOR >= 5)
  out:
 #endif
+
+  /* Fill array of struct monitor_native_res with monitor names and
+     their respective resolution.  */
+  struct monitor_native_res mnr = NULL;
+  int monitor_count = XFNS_XRANDR_NOT_AVAILABLE;
+  if (xrr_ok)
+    {
+      mnr = xcalloc (n_monitors, sizeof (struct monitor_native_res));
+      monitor_count = extract_native_res (dpyinfo, mnr, n_monitors);
+    }
+
+  /* Iterate over all monitors, and for each monitor deduce its native
+     resolution (width and height) based on its name and set
+     corresponding attributes in struct MonitorInfo. Note that in case
+     XRandR is not available at runtime native_width and native_height
+     fields in the MonitorInfo struct are both set to
+     XFNS_XRANDR_NOT_AVAILABLE. This in turn will signal to
+     x_make_monitor_attribute_list() to not include the resolution
+     attribute key in the created alist.  */
+  int native_width = XFNS_XRANDR_NOT_AVAILABLE;
+  int native_height = XFNS_XRANDR_NOT_AVAILABLE;
+  for (int i = 0; i < n_monitors; ++i)
+    {
+      if (xrr_ok)
+	{
+	  deduce_width_height(&native_width, &native_height,
+			      monitors[i].name,
+			      mnr, monitor_count);
+	}
+      monitors[i].native_width = native_width;
+      monitors[i].native_height = native_height;
+    }
+
   attributes_list = x_make_monitor_attribute_list (monitors,
                                                    n_monitors,
                                                    primary,
@@ -6504,6 +6650,7 @@ x_get_monitor_attributes_xrandr (struct x_display_info *dpyinfo)
                                                    (randr15_p
 						    ? "XRandR 1.5"
 						    : "XRandr"));
+  free_monitor_res (mnr, n_monitors);
   free_monitors (monitors, n_monitors);
   return attributes_list;
 }
@@ -6612,8 +6759,8 @@ In addition to the standard attribute keys listed in
 the attributes:
 
  source -- String describing the source from which multi-monitor
-	   information is obtained, one of \"Gdk\", \"XRandR 1.5\",
-	   \"XRandr\", \"Xinerama\", or \"fallback\"
+	   information is obtained, one of \"Gdk\", \"Gdk+XRandr\",
+	   \"XRandR 1.5\", \"XRandr\", \"Xinerama\", or \"fallback\"
 
 Internal use only, use `display-monitor-attributes-list' instead.  */)
   (Lisp_Object terminal)
@@ -6629,7 +6776,14 @@ Internal use only, use `display-monitor-attributes-list' instead.  */)
 #endif
   gint primary_monitor = 0, n_monitors, i;
   Lisp_Object monitor_frames, rest, frame;
-  static const char *source = "Gdk";
+  bool xrr_ok = false;
+#ifdef HAVE_XRANDR
+  xrr_ok = ((dpyinfo->xrandr_major_version == 1
+	     && dpyinfo->xrandr_minor_version >= 2)
+	    || dpyinfo->xrandr_major_version > 1);
+#endif
+  static const char *source_gdk_xrandr = "Gdk+XRandR";
+  static const char *source_gdk = "Gdk";
   struct MonitorInfo *monitors;
 
   block_input ();
@@ -6671,6 +6825,22 @@ Internal use only, use `display-monitor-attributes-list' instead.  */)
 	    ASET (monitor_frames, i, Fcons (frame, AREF (monitor_frames, i)));
 	}
     }
+
+#ifdef HAVE_XRANDR
+  /* Fill array of struct monitor_native_res with monitor names and
+     their respective resolution.  */
+  struct monitor_native_res *mnr = NULL;
+  int monitor_count = XFNS_XRANDR_NOT_AVAILABLE;
+  if (xrr_ok)
+    {
+      mnr = (struct monitor_native_res *)
+	xcalloc (n_monitors, sizeof (struct monitor_native_res));
+      monitor_count = extract_native_res (dpyinfo, mnr, n_monitors);
+    }
+  int native_width = XFNS_XRANDR_NOT_AVAILABLE;
+  int native_height = XFNS_XRANDR_NOT_AVAILABLE;
+  float scale_factor = (float)XFNS_XRANDR_NOT_AVAILABLE;
+#endif
 
   for (i = 0; i < n_monitors; ++i)
     {
@@ -6730,8 +6900,6 @@ Internal use only, use `display-monitor-attributes-list' instead.  */)
 #endif
       rec.x *= scale;
       rec.y *= scale;
-      rec.width *= scale;
-      rec.height *= scale;
       work.x *= scale;
       work.y *= scale;
       work.width *= scale;
@@ -6739,8 +6907,8 @@ Internal use only, use `display-monitor-attributes-list' instead.  */)
 
       mi->geom.x = rec.x;
       mi->geom.y = rec.y;
-      mi->geom.width = rec.width;
-      mi->geom.height = rec.height;
+      mi->geom.width = rec.width * scale;
+      mi->geom.height = rec.height * scale;
       mi->work.x = work.x;
       mi->work.y = work.y;
       mi->work.width = work.width;
@@ -6753,13 +6921,57 @@ Internal use only, use `display-monitor-attributes-list' instead.  */)
 #else
       mi->name = gdk_screen_get_monitor_plug_name (gscreen, i);
 #endif
+
+#ifdef HAVE_XRANDR
+      /* The width and height returned from, for instance, the function
+	 gdk_monitor_get_geometry() (stored in rec-struct) might be
+	 fractionally scaled values of the underlying device resolution
+	 (for instance if Emacs runs in an X11 Window System that is
+	 based on GTK 4). Thus the geometry width and height does not
+	 always reflect the underlying device resolution, and GDK or GTK
+	 3 does not provide any API for finding out the actual device
+	 resolution.
+
+	 As it is common to use one large display area that spans
+	 multiple monitors, this is usually implemented using
+	 XRandR. This means that it is only via XRandR API calls it is
+	 possible to find out the actual underlying device resolutions.
+
+	 Once the device resolution has been detected it is possible to
+	 calculate any applied fractional scaling by converting the
+	 non-scaled rec.width (or rec.height) to floating point values
+	 and then divide it by the device width (or height):
+
+	 fractional_scale = ((float)orig_rec_width)/((float)device_width)
+
+	 Note that GTK 3 can only provide an integer scale (as it does
+	 not support fractional scaling via its API) but can still
+	 interoperate with a graphical desktop where fractional scaling
+	 has been applied.  */
+
+      if (xrr_ok)
+	{
+	  deduce_width_height(&native_width, &native_height,
+			      mi->name,
+			      mnr, monitor_count);
+	  /* Native width (or height) divided by rec.width (or rec.height)
+	     gives fractional scale factor.  */
+	  scale_factor = ((float)native_width)/((float)rec.width);
+	}
+      mi->native_width = native_width;
+      mi->native_height = native_height;
+      mi->scale_factor = scale_factor;
+#endif
     }
 
   attributes_list = make_monitor_attribute_list (monitors,
                                                  n_monitors,
                                                  primary_monitor,
                                                  monitor_frames,
-                                                 source);
+                                                 (xrr_ok
+						  ? source_gdk_xrandr
+						  : source_gdk));
+  free_monitor_res (mnr, n_monitors);
   free_monitors (monitors, n_monitors);
   unblock_input ();
 #else  /* not USE_GTK */

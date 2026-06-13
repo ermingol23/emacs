@@ -3023,6 +3023,8 @@ of attribute keys and values as follows:
  mm-size  -- Width and height in millimeters in the form of
  	     (WIDTH HEIGHT)
  frames   -- List of frames dominated by the physical monitor
+ resolution (*) -- Native resolution of physical monitor in the form of
+                   (WIDTH HEIGHT)
  scale-factor (*) -- Scale factor (float)
  name (*) -- Name of the physical monitor as a string
  source (*) -- Source of multi-monitor information as a string
@@ -3036,13 +3038,18 @@ It may be less than the total screen size, owing to space taken up
 by window manager features (docks, taskbars, etc.).  The precise
 details depend on the platform and environment.
 
-The `source' attribute describes the source from which the
-information was obtained.  On X, this may be one of: \"Gdk\",
-\"XRandR 1.5\", \"XRandr\", \"Xinerama\", or \"fallback\".
-If it is \"fallback\", it means Emacs was built without GTK
-and without XrandR or Xinerama extensions, in which case the
-information about multiple physical monitors will be provided
-as if they all as a whole formed a single monitor.
+The `source' attribute describes the source from which the information
+was obtained.  On X, this may be one of: \"Gdk\", \"Gdk+XRandR\",
+\"XRandR 1.5\", \"XRandr\", \"Xinerama\", or \"fallback\".  If it is
+\"fallback\", it means Emacs was built without GTK and without XrandR or
+Xinerama extensions, in which case the information about multiple
+physical monitors will be provided as if they all as a whole formed a
+single monitor.
+
+When the `source' is \"Gdk+XRandR\" this means that the Native
+Resolution is provided via explicit calls to XRandR.  Gdk can only
+provide the scaled size of a monitor and it is this width and height
+that is reported in the `geometry' and `workarea' keys.
 
 A frame is dominated by a physical monitor when either the
 largest area of the frame resides in the monitor, or the monitor

@@ -1928,8 +1928,11 @@ flush_frame (struct frame *f)
 struct MonitorInfo {
   Emacs_Rectangle geom, work;
   int mm_width, mm_height;
+#if defined(HAVE_GTK3) && defined(HAVE_XRANDR)
+  int native_width, native_height;
+#endif
   char *name;
-#ifdef HAVE_PGTK
+#if defined(HAVE_PGTK) || (defined(HAVE_GTK3) && defined(HAVE_XRANDR))
   double scale_factor;
 #endif
 };
